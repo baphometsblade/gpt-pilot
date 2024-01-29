@@ -12,9 +12,9 @@ from logger.logger import logger
 from utils.style import color_yellow, color_green, color_red, color_yellow_bold
 from utils.ignore import IgnoreMatcher
 from database.database import get_saved_command_run, save_command_run
-from helpers.exceptions.TooDeepRecursionError import TooDeepRecursionError
-from helpers.exceptions.TokenLimitError import TokenLimitError
-from helpers.exceptions.CommandFinishedEarly import CommandFinishedEarly
+from helpers.exceptions import TooDeepRecursionError
+from helpers.exceptions import TokenLimitError
+from helpers.exceptions import CommandFinishedEarly
 from prompts.prompts import ask_user
 from const.code_execution import MIN_COMMAND_RUN_TIME, MAX_COMMAND_RUN_TIME, MAX_COMMAND_OUTPUT_LENGTH
 from const.messages import AFFIRMATIVE_ANSWERS, NEGATIVE_ANSWERS
@@ -473,6 +473,8 @@ def run_command_until_success(convo, command,
         return {'success': False, 'user_input': response}
 
     response = check_if_command_successful(convo, command, cli_response, response, exit_code, additional_message)
+    if response:
+        response = response.strip()
 
     if response != 'DONE':
         # 'NEEDS_DEBUGGING'

@@ -12,9 +12,9 @@ from utils.style import (
     color_cyan_bold,
     color_white_bold
 )
-from helpers.exceptions.TokenLimitError import TokenLimitError
+from helpers.exceptions import TokenLimitError
 from const.code_execution import MAX_COMMAND_DEBUG_TRIES
-from helpers.exceptions.TooDeepRecursionError import TooDeepRecursionError
+from helpers.exceptions import TooDeepRecursionError
 from helpers.Debugger import Debugger
 from utils.questionary import styled_text
 from utils.utils import step_already_finished
@@ -24,9 +24,9 @@ from helpers.Agent import Agent
 from helpers.AgentConvo import AgentConvo
 from utils.utils import should_execute_step, array_of_objects_to_string, generate_app_data
 from helpers.cli import run_command_until_success, execute_command_and_check_cli_response, running_processes
-from const.function_calls import FILTER_OS_TECHNOLOGIES, EXECUTE_COMMANDS, GET_TEST_TYPE, IMPLEMENT_TASK, COMMAND_TO_RUN
+from const.function_calls import EXECUTE_COMMANDS, GET_TEST_TYPE, IMPLEMENT_TASK, COMMAND_TO_RUN
 from database.database import save_progress, get_progress_steps, update_app_status
-from utils.utils import get_os_info
+from utils.telemetry import telemetry
 
 ENVIRONMENT_SETUP_STEP = 'environment_setup'
 
@@ -66,7 +66,9 @@ class Developer(Agent):
                     self.project.technical_writer.document_project(current_progress_percent)
                     documented_thresholds.add(threshold)
 
+            self.project.current_task.start_new_task(dev_task['description'], i + 1)
             self.implement_task(i, dev_task)
+            telemetry.inc("num_tasks")
 
         # DEVELOPMENT END
         self.project.technical_writer.document_project(100)
@@ -77,10 +79,16 @@ class Developer(Agent):
             message = 'The app is DONE!!! Yay...you can use it now.\n'
             logger.info(message)
             print(color_green_bold(message))
+            if not self.project.skip_steps:
+                telemetry.set("end_result", "success:initial-project")
+                telemetry.send()
         else:
             message = 'Feature complete!\n'
             logger.info(message)
             print(color_green_bold(message))
+            if not self.project.skip_steps:
+                telemetry.set("end_result", "success:feature")
+                telemetry.send()
 
     def implement_task(self, i, development_task=None):
         print(color_green_bold(f'Implementing task #{i + 1}: ') + color_green(f' {development_task["description"]}\n'))
@@ -94,12 +102,13 @@ class Developer(Agent):
             "clarifications": self.project.clarifications,
             "user_stories": self.project.user_stories,
             "user_tasks": self.project.user_tasks,
-            "technologies": self.project.architecture,
             "array_of_objects_to_string": array_of_objects_to_string,  # TODO check why is this here
             "directory_tree": self.project.get_directory_tree(True),
             "current_task_index": i,
             "development_tasks": self.project.development_plan,
             "files": self.project.get_all_coded_files(),
+            "architecture": self.project.architecture,
+            "technologies": self.project.system_dependencies + self.project.package_dependencies,
             "task_type": 'feature' if self.project.finished else 'app'
         })
 
@@ -157,6 +166,10 @@ class Developer(Agent):
                 return {"success": True}
 
         data = step['save_file']
+        if not self.project.skip_steps:
+            delta_lines = len(data.get("content", "").splitlines())
+            telemetry.inc("created_lines", delta_lines)
+
         self.project.save_file(data)
         return {"success": True}
 
@@ -369,6 +382,10 @@ class Developer(Agent):
             if i < continue_from_step:
                 continue
             logger.info('---------- execute_task() step #%d: %s', i, step)
+            # this if statement is for current way of loading app,
+            # once we move to backwards compatibility if statement can be removed
+            if not self.project.skip_steps:
+                self.project.current_task.inc('steps')
 
             result = None
             step_implementation_try = 0
@@ -483,7 +500,8 @@ class Developer(Agent):
                     "clarifications": self.project.clarifications,
                     "user_stories": self.project.user_stories,
                     "user_tasks": self.project.user_tasks,
-                    "technologies": self.project.architecture,
+                    "architecture": self.project.architecture,
+                    "technologies": self.project.system_dependencies + self.project.package_dependencies,
                     "array_of_objects_to_string": array_of_objects_to_string,  # TODO check why is this here
                     "directory_tree": self.project.get_directory_tree(True),
                     "current_task": development_task,
@@ -516,87 +534,50 @@ class Developer(Agent):
             step_already_finished(self.project.args, step)
             return
 
-        user_input = ''
-        while user_input.lower() != 'done':
-            print('done', type='buttons-only')
-            user_input = styled_text(self.project, 'Please set up your local environment so that the technologies listed can be utilized. When you\'re done, write "DONE"')
-        save_progress(self.project.args['app_id'], self.project.current_step, {
-            "os_specific_technologies": [],
-            "newly_installed_technologies": [],
-            "app_data": generate_app_data(self.project.args)
-        })
-        return
-        # ENVIRONMENT SETUP
         print(color_green_bold("Setting up the environment...\n"))
         logger.info("Setting up the environment...")
 
-        os_info = get_os_info()
-        llm_response = self.convo_os_specific_tech.send_message('development/env_setup/specs.prompt',
-                                                                {
-                                                                    "name": self.project.args['name'],
-                                                                    "app_type": self.project.args['app_type'],
-                                                                    "os_info": os_info,
-                                                                    "technologies": self.project.architecture
-                                                                }, FILTER_OS_TECHNOLOGIES)
+        for dependency in self.project.system_dependencies:
+            if 'description' in dependency:
+                dep_text = f"{dependency['name']} ({dependency['description']})"
+            else:
+                dep_text = dependency['name']
 
-        os_specific_technologies = llm_response['technologies']
-        for technology in os_specific_technologies:
-            logger.info('Installing %s', technology)
-            llm_response = self.install_technology(technology)
+            logger.info('Checking %s', dependency)
+            llm_response = self.check_system_dependency(dependency)
 
-            # TODO: I don't think llm_response would ever be 'DONE'?
-            if llm_response != 'DONE':
-                llm_response = self.convo_os_specific_tech.send_message(
-                    'development/env_setup/unsuccessful_installation.prompt',
-                    {'technology': technology},
-                    EXECUTE_COMMANDS)
-                installation_commands = llm_response['commands']
+            if llm_response == 'DONE':
+                print(color_green_bold(f"✅ {dep_text} is available."))
+            else:
+                if dependency["required_locally"]:
+                    remedy_text = "Please install it before proceeding with your app."
+                else:
+                    remedy_text = "If you want to use it locally, you should install it before proceeding."
+                print(color_red_bold(f"❌ {dep_text} is not available. {remedy_text}"))
 
-                if installation_commands is not None:
-                    for cmd in installation_commands:
-                        run_command_until_success(self.convo_os_specific_tech, cmd['command'], timeout=cmd['timeout'])
-
-        logger.info('The entire tech stack is installed and ready to be used.')
+                print('continue', type='buttons-only')
+                styled_text(
+                    self.project,
+                    "When you're ready to proceed, press ENTER to continue."
+                )
 
         save_progress(self.project.args['app_id'], self.project.current_step, {
-            "os_specific_technologies": os_specific_technologies,
+            "os_specific_technologies": self.project.system_dependencies,
             "newly_installed_technologies": [],
             "app_data": generate_app_data(self.project.args)
         })
 
         # ENVIRONMENT SETUP END
 
-    # TODO: This is only called from the unreachable section of set_up_environment()
-    def install_technology(self, technology):
-        # TODO move the functions definitions to function_calls.py
-        llm_response = self.convo_os_specific_tech.send_message(
-            'development/env_setup/install_next_technology.prompt',
-            {'technology': technology}, {
-                'definitions': [{
-                    'name': 'execute_command',
-                    'description': f'Executes a command that should check if {technology} is installed on the machine. ',
-                    'parameters': {
-                        'type': 'object',
-                        'properties': {
-                            'command': {
-                                'type': 'string',
-                                'description': f'Command that needs to be executed to check if {technology} is installed on the machine.',
-                            },
-                            'timeout': {
-                                'type': 'number',
-                                'description': 'Timeout in seconds for the approximate time this command takes to finish.',
-                            }
-                        },
-                        'required': ['command', 'timeout'],
-                    },
-                }],
-                'functions': {
-                    'execute_command': lambda command, timeout: (command, timeout)
-                }
-            })
-
-        cli_response, llm_response = execute_command_and_check_cli_response(self.convo_os_specific_tech, llm_response)
-
+    def check_system_dependency(self, dependency):
+        convo = AgentConvo(self)
+        cli_response, llm_response = execute_command_and_check_cli_response(
+            convo,
+            {
+                "command": dependency["test"],
+                "timeout": 10000,
+            }
+        )
         return llm_response
 
     def test_code_changes(self, code_monkey, convo):

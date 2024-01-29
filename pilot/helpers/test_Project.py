@@ -12,11 +12,7 @@ def create_project():
         'app_id': 'test-project',
         'name': 'TestProject',
         'app_type': ''
-    },
-        name='TestProject',
-        architecture=[],
-        user_stories=[]
-    )
+    })
     project.set_root_path(test_root)
     project.app = 'test'
     project.current_step = 'test'
@@ -359,7 +355,6 @@ class TestProjectFileLists:
         project.project_description = 'Test Project'
         project.development_plan = [{
             'description': 'Test User Story',
-            'programmatic_goal': 'Test Programmatic Goal',
             'user_review_goal': 'Test User Review Goal',
         }]
 

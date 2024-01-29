@@ -3,16 +3,9 @@ You are working on a {{ app_type }} called "{{ name }}" and you need to write co
 {{ project_details }}
 
 {% if current_task_index != 0 or task_type == 'feature' %}
-So far, this code has been implemented:
-{% for file in files %}
-**{{ file.path }}/{{ file.name }}**:
-```{# file.language #}
-{{ file.content }}
-```
+{{ files_list }}
 
-{% endfor %}
 {% endif %}
-
 We've broken the development of this {{ task_type }} down to these tasks:
 ```{% for task in development_tasks %}
 {{ loop.index }}. {{ task['description'] }}
@@ -34,5 +27,8 @@ Remember, I created an empty folder where I will start writing files that you te
 You do not need to make any automated tests work.
 {% endif %}
 DO NOT specify commands to create any folders or files, they will be created automatically - just specify the relative path to each file that needs to be written.
+
+**IMPORTANT**
+You must not tell me to run a command in the database or anything OS related - only if some dependencies need to be installed. If there is a need to run an OS related command, specifically tell me that this should be labeled as "Human Intervention" and explain what the human needs to do.
 
 Never use the port 5000 to run the app, it's reserved.
